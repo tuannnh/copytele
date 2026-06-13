@@ -1,0 +1,31 @@
+# secrets & session
+config.toml
+*.session
+*.session-journal
+
+# runtime data
+/data/
+/hist/
+/mnt/
+*.db
+*.db-wal
+*.db-shm
+
+# upstream reference clone (copyparty is consumed via pip)
+/_upstream/
+
+# locally-extracted build deps (pyfuse3 no-sudo build)
+/.localdeps/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# editor/agent local
+/.claude/

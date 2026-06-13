@@ -1,0 +1,49 @@
+# copytele — copyparty backed by Telegram storage.
+#
+# Portainer: Stacks -> Add stack -> paste this. Set the TGFS_* values either
+# inline below or via Portainer's "Environment variables" section.
+#
+# IMPORTANT one-time setup before first deploy — authorize the Telethon session
+# into the data volume (interactive, asks for phone number + login code):
+#
+#   docker volume create copytele-data
+#   docker run -it --rm \
+#       -e TGFS_API_ID=123456 -e TGFS_API_HASH=your_hash \
+#       -e TGFS_CHANNEL=-1001234567890 \
+#       -v copytele-data:/data \
+#       ghcr.io/OWNER/copytele:latest login
+#
+# Then deploy this stack. (Replace OWNER with your GitHub username/org.)
+
+services:
+  copytele:
+    image: ghcr.io/OWNER/copytele:latest
+    container_name: copytele
+    restart: unless-stopped
+    ports:
+      - "3923:3923"
+    environment:
+      # --- required: Telegram credentials (from https://my.telegram.org) ---
+      TGFS_API_ID: "123456"
+      TGFS_API_HASH: "your_api_hash_here"
+      # dedicated PRIVATE channel id that stores the blobs (use `... channels`)
+      TGFS_CHANNEL: "-1001234567890"
+      # --- optional tuning ---
+      TGFS_CHUNK_SIZE: "32MiB"
+      TGFS_CACHE_CAP: "5GiB"
+    volumes:
+      # holds the session, meta.db (SOURCE OF TRUTH), cache, and copyparty hist.
+      # Back this up. Losing meta.db means losing the map to your stored files.
+      - copytele-data:/data
+    # --- FUSE inside a container requires all three of these ---
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    # override the default copyparty flags here if desired, e.g. to add auth:
+    # command: ["-e2dsa", "-e2ts", "--dedup", "-a", "me:hunter2", "-v", "/mnt/tgfs:/:r,me:rwmda,me"]
+
+volumes:
+  copytele-data:

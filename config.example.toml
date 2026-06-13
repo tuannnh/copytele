@@ -1,0 +1,33 @@
+# Copy to config.toml and fill in. config.toml is gitignored (it holds secrets).
+# Any value can also be supplied via environment variable TGFS_<UPPERCASE_KEY>,
+# e.g. TGFS_API_ID, TGFS_API_HASH, TGFS_CHANNEL. Env vars win over the file.
+
+[telegram]
+# from https://my.telegram.org -> API development tools
+api_id = 0
+api_hash = "your_api_hash_here"
+
+# Telethon session file (created on first `tgfs login`). Keep it secret.
+session = "tgfs.session"
+
+# Dedicated PRIVATE channel that stores the file blobs.
+# Accepts a numeric id (e.g. -1001234567890), a @username, or a t.me/+invite link.
+# Use `tgfs channels` to list channels you can post to and find the id.
+channel = -1001234567890
+
+[storage]
+# logical content chunk size; one Telegram message/document per chunk.
+# 32 MiB keeps message counts low while staying well under Telegram's per-file limit.
+chunk_size = "32MiB"
+
+# local read-cache size cap (LRU eviction by sha256). Writeback temp files are
+# not counted against this and live in cache_dir/wb while a file is open for write.
+cache_cap = "5GiB"
+
+[paths]
+# tgfs's OWN metadata index (the source of truth for the directory tree).
+meta_db = "data/meta.db"
+# local cache + writeback scratch.
+cache_dir = "data/cache"
+# default mountpoint for the FUSE filesystem.
+mount = "mnt"
