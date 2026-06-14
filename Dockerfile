@@ -48,5 +48,10 @@ EXPOSE 3923
 
 # everything under /data persists across restarts; meta.db is the source of truth
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
-# default copyparty feature flags (override by setting `command:` in compose)
-CMD ["-e2dsa", "-e2ts", "--dedup"]
+# default copyparty flags (override by setting `command:` in compose):
+#   -e2dsa/-e2ts  search index + media tags
+#   --dedup       upload deduplication
+#   --xff-src lan trust reverse-proxies on private IPs so X-Forwarded-Proto/Host
+#                 are honored (required for HTTPS-reverse-proxy uploads, else
+#                 copyparty rejects them with a cors-check 403)
+CMD ["-e2dsa", "-e2ts", "--dedup", "--xff-src", "lan"]

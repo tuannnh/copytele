@@ -46,12 +46,57 @@ class TelegramBackend:
                 "Telegram session is not authorized; run `tgfs login` first"
             )
         self._client = client
-        self._entity = await client.get_entity(self.cfg.channel)
+        self._entity = await self._resolve_channel()
         me = await client.get_me()
         log.info(
             "connected as %s; storage channel resolved: %s",
             getattr(me, "username", None) or me.id,
             getattr(self._entity, "title", self.cfg.channel),
+        )
+
+    async def _resolve_channel(self):
+        """Resolve cfg.channel to an entity, robustly.
+
+        A freshly-created session (e.g. from `tgfs login` in a container) has not
+        cached the channel, so a bare numeric id can't be looked up — and a
+        positive id is ambiguously treated as a user. We first try a direct
+        resolve (works for @usernames, t.me links, and already-cached ids), then
+        fall back to scanning dialogs and matching by id (in either bot-API
+        ``-100…`` or raw form) or by title. Scanning also warms the entity cache.
+        """
+        ch = self.cfg.channel
+        try:
+            return await self.client.get_entity(ch)
+        except (ValueError, TypeError):
+            pass
+
+        ids: set[int] = set()
+        title = None
+        if isinstance(ch, int):
+            raw = abs(ch)
+            ids.add(raw)
+            s = str(raw)
+            if s.startswith("100"):  # strip bot-API channel prefix
+                ids.add(int(s[3:]))
+        else:
+            title = str(ch).lstrip("@")
+
+        async for d in self.client.iter_dialogs():
+            if not d.is_channel:
+                continue
+            ent = d.entity
+            if title is not None:
+                uname = getattr(ent, "username", None)
+                if (uname and uname.lower() == title.lower()) or \
+                        getattr(ent, "title", None) == title:
+                    return ent
+            elif ent.id in ids or d.id == ch:
+                return ent
+
+        raise RuntimeError(
+            f"storage channel {ch!r} not found among this account's dialogs. "
+            "Check the id with `tgfs channels`, use the -100… form (or the "
+            "channel @username / title), and make sure this account is a member."
         )
 
     @property

@@ -42,8 +42,11 @@ services:
       - SYS_ADMIN
     security_opt:
       - apparmor:unconfined
-    # override the default copyparty flags here if desired, e.g. to add auth:
-    # command: ["-e2dsa", "-e2ts", "--dedup", "-a", "me:hunter2", "-v", "/mnt/tgfs:/:r,me:rwmda,me"]
+    # default command is: -e2dsa -e2ts --dedup --xff-src lan
+    # (--xff-src lan lets copyparty trust your reverse proxy's X-Forwarded-Proto,
+    #  required for HTTPS-proxy uploads; your proxy must forward that header).
+    # override to add auth, an explicit allowed origin, etc. — but keep --xff-src:
+    # command: ["-e2dsa","-e2ts","--dedup","--xff-src","lan","-a","me:hunter2","-v","/mnt/tgfs:/:r,me:rwmda,me"]
 
 volumes:
   copytele-data:

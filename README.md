@@ -127,9 +127,29 @@ docker compose up -d
 ```
 
 copyparty comes up on port `3923` with all feature flags enabled
-(`-e2dsa -e2ts --dedup`). Put it behind your HTTPS reverse proxy as usual; to
-have copyparty trust the proxy's `X-Forwarded-For`, append e.g.
-`command: ["-e2dsa","-e2ts","--dedup","--xff-src","10.0.0.0/8"]`.
+(`-e2dsa -e2ts --dedup --xff-src lan`).
+
+### Behind an HTTPS reverse proxy
+
+copyparty only honors forwarded headers from trusted proxy IPs; the image default
+`--xff-src lan` trusts private-range proxies (Docker networks, your LAN). Your
+proxy **must forward these headers**, or uploads fail with a `cors-check 403`
+(copyparty sees plain `http` and the browser's `https://` Origin no longer
+matches):
+
+```nginx
+location / {
+    proxy_pass http://copytele:3923;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;   # <- the critical one
+    client_max_body_size 0;                       # allow large uploads
+}
+```
+
+Caddy does this automatically (`reverse_proxy copytele:3923`). If you still see
+cors-check rejections, you can instead whitelist your origin explicitly by adding
+`--acao https://files.example.com` to the `command:`.
 
 ### Notes
 
