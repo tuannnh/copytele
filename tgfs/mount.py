@@ -13,6 +13,7 @@ import errno
 import functools
 import logging
 import os
+import signal
 import stat
 import time
 
@@ -218,12 +219,24 @@ def build_core(cfg: Config, *, connect: bool = True):
     backend = TelegramBackend(cfg, loop, connect=connect)
     meta = Meta(cfg.meta_db)
     cache = ReadCache(cfg.cache_dir, cfg.cache_cap)
-    store = Store(meta, backend, cfg.chunk_size, cache)
-    wb = WritebackManager(store, meta, cfg.cache_dir)
+    store = Store(
+        meta, backend, cfg.chunk_size, cache,
+        upload_workers=cfg.upload_workers,
+        download_workers=cfg.download_workers,
+        readahead_chunks=cfg.readahead_chunks,
+    )
+    wb = WritebackManager(
+        store, meta, cfg.cache_dir, flush_delay=cfg.writeback_delay
+    )
     core = FsCore(meta, store, wb)
 
     def cleanup():
         try:
+            wb.shutdown()  # push unflushed writes to Telegram first
+        except Exception:
+            log.exception("final writeback flush failed")
+        try:
+            store.close()
             meta.close()
         finally:
             backend.close()
@@ -242,6 +255,10 @@ def mount(cfg: Config, mountpoint: str, *, foreground: bool = True, debug: bool 
     if debug:
         fuse_options.add("debug")
 
+    # docker stop / the entrypoint's kill: unwind through the same cleanup path
+    # (final writeback flush) instead of dying with unflushed data
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
     log.info("mounting tgfs at %s", mountpoint)
     pyfuse3.init(ops, mountpoint, fuse_options)
     try:
@@ -249,6 +266,8 @@ def mount(cfg: Config, mountpoint: str, *, foreground: bool = True, debug: bool 
     except KeyboardInterrupt:
         log.info("interrupted; unmounting")
     finally:
+        # the final writeback flush must not be interrupted by a late SIGTERM
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         pyfuse3.close(unmount=True)
         cleanup()
     return 0

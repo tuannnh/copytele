@@ -20,6 +20,8 @@ services:
     image: ghcr.io/OWNER/copytele:latest
     container_name: copytele
     restart: unless-stopped
+    # on stop, tgfs flushes unuploaded writes to Telegram first: give it time
+    stop_grace_period: 15m
     ports:
       - "3923:3923"
     environment:
@@ -30,6 +32,12 @@ services:
       TGFS_CHANNEL: "-1001234567890"
       # --- optional tuning ---
       TGFS_CHUNK_SIZE: "32MiB"
+      TGFS_CONNECTIONS: "0"
+      TGFS_UPLOAD_WORKERS: "2"
+      TGFS_DOWNLOAD_WORKERS: "2"
+      TGFS_READAHEAD_CHUNKS: "2"
+      # seconds a closed-but-modified file waits before it is uploaded to Telegram
+      TGFS_WRITEBACK_DELAY: "15"
       TGFS_CACHE_CAP: "5GiB"
     volumes:
       # holds the session, meta.db (SOURCE OF TRUTH), cache, and copyparty hist.
@@ -46,6 +54,9 @@ services:
     # (--xff-src lan lets copyparty trust your reverse proxy's X-Forwarded-Proto,
     #  required for HTTPS-proxy uploads; your proxy must forward that header).
     # override to add auth, an explicit allowed origin, etc. — but keep --xff-src:
+    # behind a proxy that sends "X-Forwarded-For: <client>, 127.0.0.1" add
+    # "--rproxy","-2" (copyparty logs the exact value to use) to silence the
+    # untrusted-proxy errors and fix the "recent uploads" list.
     # command: ["-e2dsa","-e2ts","--dedup","--xff-src","lan","-a","me:hunter2","-v","/mnt/tgfs:/:r,me:rwmda,me"]
 
 volumes:

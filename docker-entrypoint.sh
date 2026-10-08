@@ -28,7 +28,11 @@ cleanup() {
     [ -n "$CP_PID" ] && kill "$CP_PID" 2>/dev/null || true
     echo "[entrypoint] unmounting $MNT"
     fusermount3 -u "$MNT" 2>/dev/null || fusermount3 -uz "$MNT" 2>/dev/null || true
-    [ -n "$MOUNT_PID" ] && kill "$MOUNT_PID" 2>/dev/null || true
+    if [ -n "$MOUNT_PID" ]; then
+        kill "$MOUNT_PID" 2>/dev/null || true
+        # let tgfs finish its final writeback flush to Telegram
+        wait "$MOUNT_PID" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT INT TERM
 
