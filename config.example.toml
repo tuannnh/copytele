@@ -32,6 +32,12 @@ download_workers = 2
 # chunks prefetched ahead of a sequential read
 readahead_chunks = 2
 
+# a closed, modified file is uploaded to Telegram only after it has been idle this
+# many seconds (so clients that reopen the file per piece, like copyparty's up2k,
+# don't trigger an upload per piece). fsync and unmount flush immediately.
+# 0 = upload on every close (old behaviour). Unflushed data is lost on a crash.
+writeback_delay = 15
+
 # local read-cache size cap (LRU eviction by sha256). Writeback temp files are
 # not counted against this and live in cache_dir/wb while a file is open for write.
 cache_cap = "5GiB"

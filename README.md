@@ -199,6 +199,10 @@ disk (`--hist`), and content-addressed dedup.
   every blob well under that, so file size is effectively unbounded. Splitting
   is automatic and invisible: copyparty/FUSE see one file, tgfs stores N chunks.
   Premium needs no setting; just keep `chunk_size` <= 4000MiB.
+- Writes land in a local temp file first (sparse; only touched chunks are
+  fetched) and reach Telegram `writeback_delay` seconds after the file goes
+  idle, uploading only the chunks that changed. Keep free disk >= your largest
+  upload in `cache_dir`, and let the container stop gracefully (it flushes).
 - Throughput: chunks upload/download in parallel (`connections` per chunk, `upload_workers`,
   `download_workers`), sequential reads prefetch `readahead_chunks`, and cached
   chunks are range-read from disk. RAM peak ~ (workers + readahead) x chunk_size.

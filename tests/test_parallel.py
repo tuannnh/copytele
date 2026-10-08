@@ -184,3 +184,95 @@ def test_readahead_not_flooded_and_sequential_only(pstore, meta, monkeypatch):
         store.read_range(ino, off, 1)
     time.sleep(0.2)
     assert len(calls) <= store.readahead
+
+
+# --------------------------- writeback (up2k-style) ---------------------------
+from tgfs.cache import WritebackManager  # noqa: E402
+
+
+@pytest.fixture
+def wbm(meta, tmp_path):
+    be = MemoryBackend()
+    store = Store(meta, be, 16, upload_workers=2, download_workers=2)
+    wb = WritebackManager(store, meta, tmp_path / "wb", flush_delay=0.3)
+    yield wb, store, be
+    wb.shutdown()
+    store.close()
+
+
+def _wait(pred, t=3.0):
+    end = time.time() + t
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_reopen_cycle_defers_flush_and_never_redownloads(wbm, meta):
+    wb, store, be = wbm
+    ino = _mk(meta)
+    n = 40  # 40 chunks of 16 bytes
+    st = wb.open(ino, True)
+    wb.truncate(st, 16 * n)  # up2k preallocates
+    wb.release(st)
+    for k in range(n):  # one open/write/close per piece, like up2k
+        st = wb.open(ino, True)
+        wb.write(st, bytes([k + 1]) * 16, 16 * k)
+        wb.flush(st)  # FUSE flush on close: must be lazy
+        wb.release(st)
+        assert wb.live_size(ino) == 16 * n
+    assert be.uploads == 0 and be.downloads == 0  # nothing hit Telegram yet
+    assert _wait(lambda: meta.get_inode(ino).size == 16 * n)  # idle -> flushed
+    assert be.uploads == n  # each distinct chunk once
+    want = b"".join(bytes([k + 1]) * 16 for k in range(n))
+    assert store.read_range(ino, 0, len(want)) == want
+
+
+def test_partial_edit_uploads_only_dirty_chunk(wbm, meta):
+    wb, store, be = wbm
+    ino = _mk(meta)
+    base = b"".join(bytes([i]) * 16 for i in range(10))
+    st = wb.open(ino, True)
+    wb.write(st, base, 0)
+    wb.sync(st)
+    wb.release(st)
+    assert _wait(lambda: ino not in wb._states)
+    up0, down0 = be.uploads, be.downloads
+    st = wb.open(ino, True)  # fresh state: must not download everything
+    wb.write(st, b"XX", 5 * 16 + 3)  # inside chunk 5
+    wb.sync(st)
+    assert be.downloads - down0 == 1  # only chunk 5 fetched
+    assert be.uploads - up0 == 1  # only chunk 5 re-uploaded
+    wb.release(st)
+    exp = bytearray(base)
+    exp[83:85] = b"XX"
+    assert store.read_range(ino, 0, len(exp)) == bytes(exp)
+
+
+def test_truncate_and_grow_roundtrip(wbm, meta):
+    wb, store, be = wbm
+    ino = _mk(meta)
+    st = wb.open(ino, True)
+    wb.write(st, b"A" * 40, 0)
+    wb.sync(st)
+    wb.truncate(st, 20)
+    wb.sync(st)
+    assert store.read_range(ino, 0, 100) == b"A" * 20
+    wb.truncate(st, 50)  # grow -> zero padded
+    wb.write(st, b"Z", 49)
+    wb.sync(st)
+    wb.release(st)
+    assert store.read_range(ino, 0, 100) == b"A" * 20 + b"\x00" * 29 + b"Z"
+
+
+def test_discard_drops_pending_without_upload(wbm, meta):
+    wb, store, be = wbm
+    ino = _mk(meta)
+    st = wb.open(ino, True)
+    wb.write(st, b"q" * 32, 0)
+    wb.release(st)
+    wb.discard(ino)
+    time.sleep(0.6)
+    assert be.uploads == 0
+    assert ino not in wb._states

@@ -64,14 +64,21 @@ class Store:
         if handle is not None:
             self.backend.delete(handle)
 
-    def put_file(self, ino: int, src: BinaryIO, size: int) -> None:
+    def put_file(
+        self, ino: int, src: BinaryIO, size: int, dirty: set[int] | None = None
+    ) -> None:
         """Replace inode `ino`'s content with the bytes read from `src`.
 
         `src` is positioned at 0 and yields exactly `size` bytes. Chunks upload
         concurrently (bounded by `upload_workers`, so at most that many chunks
         are held in memory); the chunk list keeps file order regardless.
+
+        If `dirty` is given, only those chunk indexes (plus any chunk without a
+        matching stored one) are read/hashed/uploaded; the rest reuse their
+        existing blob and `src` is never read for them (it may be sparse).
         """
-        old_shas = self.meta.get_chunk_shas(ino)
+        old_rows = self.meta.get_chunks(ino)
+        old_shas = [r["sha"] for r in old_rows]
 
         new: list[tuple[int, int, int, str]] = []  # (idx, off, len, sha)
         acquired: list[str] = []  # refs taken so far (rolled back on failure)
@@ -81,8 +88,26 @@ class Store:
         try:
             idx = 0
             off = 0
-            while True:
-                data = src.read(self.chunk_size)
+            while off < size:
+                want = min(self.chunk_size, size - off)
+                if (
+                    dirty is not None and idx not in dirty and idx < len(old_rows)
+                    and old_rows[idx]["off"] == off and old_rows[idx]["len"] == want
+                ):
+                    sha = old_rows[idx]["sha"]
+                    with self._blob_lock:
+                        known = self.meta.blob_get(sha) is not None
+                        if known:
+                            self.meta.blob_incref(sha)
+                    if not known:
+                        raise OSError(f"clean chunk {idx} of inode {ino}: blob missing")
+                    acquired.append(sha)
+                    new.append((idx, off, want, sha))
+                    idx += 1
+                    off += want
+                    src.seek(off)
+                    continue
+                data = src.read(want)
                 if not data:
                     break
                 sha = hashlib.sha256(data).hexdigest()

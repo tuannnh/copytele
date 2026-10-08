@@ -38,17 +38,25 @@ class FsCore:
         self._pending_unlink: set[int] = set()
 
     # ----- attributes ------------------------------------------------------
+    def _live(self, n: Inode) -> Inode:
+        """Overlay the size of a file with unflushed writes."""
+        if n.kind == "f":
+            sz = self.wb.live_size(n.id)
+            if sz is not None:
+                n.size = sz
+        return n
+
     def getattr(self, ino: int) -> Inode:
         n = self.meta.get_inode(ino)
         if n is None:
             raise _err(errno.ENOENT)
-        return n
+        return self._live(n)
 
     def lookup(self, parent: int, name: str) -> Inode:
         n = self.meta.lookup(parent, name)
         if n is None:
             raise _err(errno.ENOENT)
-        return n
+        return self._live(n)
 
     def readdir(self, ino: int) -> list[tuple[str, int]]:
         n = self.meta.get_inode(ino)
@@ -140,6 +148,7 @@ class FsCore:
             if self._is_open(ino):
                 self._pending_unlink.add(ino)  # defer until last close
             else:
+                self.wb.discard(ino)
                 self.store.free_file(ino)
 
     def rename(self, oldp: int, oldname: str, newp: int, newname: str) -> None:
@@ -153,6 +162,7 @@ class FsCore:
             if self._is_open(replaced):
                 self._pending_unlink.add(replaced)
             else:
+                self.wb.discard(replaced)
                 self.store.free_file(replaced)
 
     # ----- file handles & io ----------------------------------------------
@@ -219,7 +229,7 @@ class FsCore:
 
     def fsync(self, fh: int) -> None:
         st = self._get_state(fh)
-        self.wb.flush(st)
+        self.wb.sync(st)
 
     def release(self, fh: int) -> None:
         with self._fh_lock:
@@ -230,6 +240,7 @@ class FsCore:
         ino = getattr(st, "ino")
         if ino in self._pending_unlink and not self._is_open(ino):
             self._pending_unlink.discard(ino)
+            self.wb.discard(ino)
             self.store.free_file(ino)
 
     # ----- misc ------------------------------------------------------------
