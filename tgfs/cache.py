@@ -351,9 +351,13 @@ class WritebackManager:
         nchunks = -(-st.size // cs)
         # chunks past the stored ones that nobody wrote are all zeros
         holes = set(range(len(st.base), nchunks)) - st.dirty_idx
+        t0 = time.monotonic()
+        ndirty = len(st.dirty_idx)
         self.store.put_file(
             st.ino, st.fobj, st.size, dirty=st.dirty_idx, holes=holes
         )
+        log.info("flushed inode %d: %.1f MiB, %d dirty chunk(s) in %.1fs",
+                 st.ino, st.size / 2**20, ndirty, time.monotonic() - t0)
         rows = self.meta.get_chunks(st.ino)
         st.base = [(r["off"], r["len"], r["sha"]) for r in rows]
         st.loaded |= set(range(old_n, len(st.base)))  # fresh chunks live in temp

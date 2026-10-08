@@ -62,11 +62,17 @@ done
 is_mounted || { echo "[entrypoint] ERROR: mount not ready"; exit 1; }
 echo "[entrypoint] mount ready; starting copyparty on :$PORT"
 
+# optional: trust the reverse proxy's X-Forwarded-For (e.g. COPYPARTY_RPROXY=-2
+# when the proxy chain sends "<client>, 127.0.0.1")
+EXTRA=()
+[ -n "${COPYPARTY_RPROXY:-}" ] && EXTRA+=(--rproxy "$COPYPARTY_RPROXY")
+
 # data on Telegram (the mount); copyparty index/thumbs on local disk (--hist)
 python -m copyparty \
     -i 0.0.0.0 -p "$PORT" \
     -v "$MNT::A" \
     --hist "$HIST" \
+    "${EXTRA[@]}" \
     "$@" &
 CP_PID=$!
 wait "$CP_PID"

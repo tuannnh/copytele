@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import time
 from typing import Any
 
 from telethon import TelegramClient
@@ -189,14 +190,23 @@ class TelegramBackend:
             )
         return pool
 
+    def _note(self, what: str, n: int, t0: float, how: str) -> None:
+        dt = max(time.perf_counter() - t0, 1e-6)
+        if n >= 8 * MIB:  # only log real chunks, not tiny probes
+            log.info("%s %.1f MiB in %.1fs = %.1f MiB/s (%s)",
+                     what, n / MIB, dt, n / MIB / dt, how)
+
     async def _upload(self, data: bytes) -> int:
         async def go():
+            t0 = time.perf_counter()
+            how = "stock"
             file: Any = None
             if self.conns > 1 and len(data) > fasttransfer.BIG_FILE:
                 try:
                     file = await fasttransfer.upload_big(
                         self._pool(self.client.session.dc_id), data, _CHUNK_NAME
                     )
+                    how = f"{self.conns} conns"
                 except Exception as ex:
                     log.warning("parallel upload failed (%s); using stock path", ex)
             if file is None:
@@ -208,6 +218,7 @@ class TelegramBackend:
                 force_document=True,
                 attributes=[DocumentAttributeFilename(_CHUNK_NAME)],
             )
+            self._note("uploaded", len(data), t0, how)
             return int(msg.id)
 
         return await self._with_retry("upload", go)
@@ -217,16 +228,20 @@ class TelegramBackend:
             msg = await self.client.get_messages(self._entity, ids=handle)
             if msg is None or msg.media is None:
                 raise FileNotFoundError(f"blob message {handle} missing")
+            t0 = time.perf_counter()
             doc = getattr(msg, "document", None)
             if self.conns > 1 and doc is not None and doc.size > 4 * MIB:
                 try:
-                    return await fasttransfer.download_doc(
+                    out = await fasttransfer.download_doc(
                         self._pool(doc.dc_id), self.client, msg.media, doc.size
                     )
+                    self._note("downloaded", len(out), t0, f"{self.conns} conns")
+                    return out
                 except Exception as ex:
                     log.warning("parallel download failed (%s); using stock path", ex)
             data = await self.client.download_media(msg, file=bytes)
             assert isinstance(data, (bytes, bytearray))
+            self._note("downloaded", len(data), t0, "stock")
             return bytes(data)
 
         return await self._with_retry("download", go)
