@@ -37,7 +37,10 @@ class Store:
         self._down = ThreadPoolExecutor(
             self.download_workers, thread_name_prefix="tgfs-down"
         )
-        self._blob_lock = threading.Lock()  # serializes create-vs-incref races
+        self._blob_lock = threading.Lock()  # serializes create/incref/decref races
+        self._ra_lock = threading.Lock()
+        self._ra_queued: set[str] = set()  # shas with a prefetch task queued
+        self._last_end: dict[int, int] = {}  # ino -> end offset of last read
 
     def close(self) -> None:
         self._up.shutdown(wait=False, cancel_futures=True)
@@ -56,7 +59,8 @@ class Store:
         self.backend.delete(handle)
 
     def _release(self, sha: str) -> None:
-        handle = self.meta.blob_decref(sha)
+        with self._blob_lock:  # vs. put_file's check-then-incref
+            handle = self.meta.blob_decref(sha)
         if handle is not None:
             self.backend.delete(handle)
 
@@ -129,9 +133,7 @@ class Store:
     def free_file(self, ino: int) -> None:
         """Release all blobs referenced by an inode (used when nlink hits 0)."""
         for sha in self.meta.get_chunk_shas(ino):
-            handle = self.meta.blob_decref(sha)
-            if handle is not None:
-                self.backend.delete(handle)
+            self._release(sha)
         self.meta.set_chunks(ino, [])
 
     # ----- reading -----------------------------------------------------------
@@ -167,9 +169,15 @@ class Store:
 
     def _prefetch(self, shas: list[str]) -> None:
         for sha in shas:
+            with self._ra_lock:
+                if sha in self._ra_queued or self.cache.has(sha):
+                    continue
+                self._ra_queued.add(sha)
             try:
                 loader = self._fetcher(sha)
             except FileNotFoundError:
+                with self._ra_lock:
+                    self._ra_queued.discard(sha)
                 continue
             self._down.submit(self._safe_prefetch, sha, loader)
 
@@ -178,6 +186,9 @@ class Store:
             self.cache.prefetch(sha, loader)
         except Exception:
             pass  # best-effort; a real read will surface any error
+        finally:
+            with self._ra_lock:
+                self._ra_queued.discard(sha)
 
     def read_range(self, ino: int, offset: int, length: int) -> bytes:
         """Assemble a byte range from the inode's chunks.
@@ -208,7 +219,11 @@ class Store:
             futs = [self._down.submit(part, ch) for _, ch in hit]
             out = b"".join(f.result() for f in futs)
 
-        if self.readahead:
+        sequential = self._last_end.get(ino) == offset
+        if len(self._last_end) > 4096:
+            self._last_end.clear()
+        self._last_end[ino] = end
+        if self.readahead and sequential:
             nxt = hit[-1][0] + 1
             self._prefetch([c["sha"] for c in chunks[nxt : nxt + self.readahead]])
         return out

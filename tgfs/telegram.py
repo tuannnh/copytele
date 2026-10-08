@@ -159,7 +159,6 @@ class TelegramBackend:
             msg = await self.client.send_file(
                 self._entity,
                 file=buf,
-                part_size_kb=512,
                 force_document=True,
                 attributes=[DocumentAttributeFilename(_CHUNK_NAME)],
             )
@@ -172,12 +171,9 @@ class TelegramBackend:
             msg = await self.client.get_messages(self._entity, ids=handle)
             if msg is None or msg.media is None:
                 raise FileNotFoundError(f"blob message {handle} missing")
-            out = bytearray()
-            async for part in self.client.iter_download(
-                msg.media, request_size=1024 * 1024
-            ):
-                out += part
-            return bytes(out)
+            data = await self.client.download_media(msg, file=bytes)
+            assert isinstance(data, (bytes, bytearray))
+            return bytes(data)
 
         return await self._with_retry("download", go)
 

@@ -107,8 +107,13 @@ class ReadCache:
         data = loader()
         return data if lo is None else data[lo:hi]
 
+    def has(self, sha: str) -> bool:
+        with self.lock:
+            return sha in self._index or sha in self._inflight
+
     def prefetch(self, sha: str, loader: Callable[[], bytes]) -> None:
-        if self._read_cached(sha, 0, 0) is None:
+        """Best-effort background fill; never waits on another download."""
+        if not self.has(sha):
             self._load_once(sha, loader)
 
     def _store(self, sha: str, data: bytes) -> None:

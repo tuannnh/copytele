@@ -154,8 +154,33 @@ def test_readahead_prefetches_next_chunks(pstore, meta):
             p.unlink()
             store.cache._total -= store.cache._index.pop(sha)
     d0 = be.downloads
-    store.read_range(ino, 0, 4)  # chunk 0 only; chunks 1,2 prefetched
+    store.read_range(ino, 0, 4)  # first read: not yet sequential
+    store.read_range(ino, 4, 4)  # sequential -> chunks 1,2 prefetched
     deadline = time.time() + 2
     while be.downloads < d0 + 3 and time.time() < deadline:
         time.sleep(0.02)
     assert be.downloads == d0 + 3
+
+
+def test_readahead_not_flooded_and_sequential_only(pstore, meta, monkeypatch):
+    store, be = pstore
+    ino = _mk(meta)
+    _put(store, ino, b"".join(bytes([i]) * 16 for i in range(6)))
+    calls = []
+    real = store.cache.prefetch
+    monkeypatch.setattr(
+        store.cache, "prefetch", lambda sha, ld: (calls.append(sha), real(sha, ld))
+    )
+    for sha in meta.get_chunk_shas(ino):  # cold cache
+        p = store.cache._path(sha)
+        if p.exists():
+            p.unlink()
+            store.cache._total -= store.cache._index.pop(sha)
+    store.read_range(ino, 50, 2)  # random read: no readahead
+    store.read_range(ino, 0, 1)  # random again
+    time.sleep(0.1)
+    assert calls == []
+    for off in range(1, 15):  # 14 tiny sequential reads inside chunk 0
+        store.read_range(ino, off, 1)
+    time.sleep(0.2)
+    assert len(calls) <= store.readahead
