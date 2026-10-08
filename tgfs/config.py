@@ -52,6 +52,9 @@ class Config:
     channel: int | str
     chunk_size: int
     cache_cap: int
+    upload_workers: int
+    download_workers: int
+    readahead_chunks: int
     meta_db: Path
     cache_dir: Path
     mount: Path
@@ -93,13 +96,22 @@ def load(path: str | Path = "config.toml") -> Config:
     if isinstance(channel, str) and channel.lstrip("-").isdigit():
         channel = int(channel)
 
+    chunk_size = parse_size(pick(st, "chunk_size", "32MiB"))
+    # Telegram caps one document at 2 GiB (4 GiB on Premium). A file bigger than
+    # a chunk is split into chunks automatically, so this only bounds one chunk.
+    if chunk_size > 4000 * 1024**2:
+        raise ValueError("storage.chunk_size must not exceed 4000MiB")
+
     cfg = Config(
         api_id=int(pick(tg, "api_id")),
         api_hash=str(pick(tg, "api_hash")),
         session=root / str(pick(tg, "session", "tgfs.session")),
         channel=channel,
-        chunk_size=parse_size(pick(st, "chunk_size", "32MiB")),
+        chunk_size=chunk_size,
         cache_cap=parse_size(pick(st, "cache_cap", "5GiB")),
+        upload_workers=int(pick(st, "upload_workers", 4)),
+        download_workers=int(pick(st, "download_workers", 4)),
+        readahead_chunks=int(pick(st, "readahead_chunks", 2)),
         meta_db=root / str(pick(pa, "meta_db", "data/meta.db")),
         cache_dir=root / str(pick(pa, "cache_dir", "data/cache")),
         mount=root / str(pick(pa, "mount", "mnt")),

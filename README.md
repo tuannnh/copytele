@@ -196,7 +196,12 @@ disk (`--hist`), and content-addressed dedup.
 ## Limits & notes
 
 - Telegram allows ~2 GB/file (4 GB premium); chunking (default 32 MiB) keeps
-  every blob well under that, so file size is effectively unbounded.
+  every blob well under that, so file size is effectively unbounded. Splitting
+  is automatic and invisible: copyparty/FUSE see one file, tgfs stores N chunks.
+  Premium needs no setting; just keep `chunk_size` <= 4000MiB.
+- Throughput: chunks upload/download in parallel (`upload_workers`,
+  `download_workers`), sequential reads prefetch `readahead_chunks`, and cached
+  chunks are range-read from disk. RAM peak ~ (workers + readahead) x chunk_size.
 - Don't point two tgfs instances at the same channel + metadata DB simultaneously.
 - Secrets (`config.toml`, `*.session`) are gitignored. Keep them safe — the
   session file is full account access.

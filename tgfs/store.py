@@ -11,7 +11,10 @@ chunks are uploaded, and orphaned blobs are deleted from Telegram.
 from __future__ import annotations
 
 import hashlib
-from typing import BinaryIO
+import threading
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from typing import BinaryIO, Iterator
 
 from .backend import Backend
 from .meta import Meta
@@ -19,51 +22,109 @@ from .meta import Meta
 
 class Store:
     def __init__(
-        self, meta: Meta, backend: Backend, chunk_size: int, cache=None
+        self, meta: Meta, backend: Backend, chunk_size: int, cache=None,
+        *, upload_workers: int = 1, download_workers: int = 1,
+        readahead_chunks: int = 0,
     ) -> None:
         self.meta = meta
         self.backend = backend
         self.chunk_size = chunk_size
         self.cache = cache  # optional ReadCache
+        self.upload_workers = max(1, upload_workers)
+        self.download_workers = max(1, download_workers)
+        self.readahead = max(0, readahead_chunks) if cache is not None else 0
+        self._up = ThreadPoolExecutor(self.upload_workers, thread_name_prefix="tgfs-up")
+        self._down = ThreadPoolExecutor(
+            self.download_workers, thread_name_prefix="tgfs-down"
+        )
+        self._blob_lock = threading.Lock()  # serializes create-vs-incref races
+
+    def close(self) -> None:
+        self._up.shutdown(wait=False, cancel_futures=True)
+        self._down.shutdown(wait=False, cancel_futures=True)
+
+    # ----- writing -----------------------------------------------------------
+    def _upload_blob(self, sha: str, data: bytes) -> None:
+        """Upload a new chunk and register it (refcount 1), or, if a concurrent
+        writer registered the same sha first, drop our copy and incref theirs."""
+        handle = self.backend.upload(data)
+        with self._blob_lock:
+            if self.meta.blob_get(sha) is None:
+                self.meta.blob_create(sha, handle, len(data))
+                return
+            self.meta.blob_incref(sha)
+        self.backend.delete(handle)
+
+    def _release(self, sha: str) -> None:
+        handle = self.meta.blob_decref(sha)
+        if handle is not None:
+            self.backend.delete(handle)
 
     def put_file(self, ino: int, src: BinaryIO, size: int) -> None:
         """Replace inode `ino`'s content with the bytes read from `src`.
 
-        `src` is positioned at 0 and yields exactly `size` bytes.
+        `src` is positioned at 0 and yields exactly `size` bytes. Chunks upload
+        concurrently (bounded by `upload_workers`, so at most that many chunks
+        are held in memory); the chunk list keeps file order regardless.
         """
         old_shas = self.meta.get_chunk_shas(ino)
 
         new: list[tuple[int, int, int, str]] = []  # (idx, off, len, sha)
-        idx = 0
-        off = 0
-        while True:
-            data = src.read(self.chunk_size)
-            if not data:
-                break
-            sha = hashlib.sha256(data).hexdigest()
-            # incref-or-upload BEFORE we drop the old refs, so a blob shared
-            # between old and new content is never deleted then re-uploaded.
-            if self.meta.blob_get(sha) is None:
-                handle = self.backend.upload(data)
-                # a concurrent writer may have created it meanwhile; tolerate
-                if self.meta.blob_get(sha) is None:
-                    self.meta.blob_create(sha, handle, len(data))
+        acquired: list[str] = []  # refs taken so far (rolled back on failure)
+        pending: dict[str, Future] = {}  # sha -> upload in flight in this call
+        dups: list[str] = []  # repeats of a pending sha; incref'd after upload
+        running: set[Future] = set()
+        try:
+            idx = 0
+            off = 0
+            while True:
+                data = src.read(self.chunk_size)
+                if not data:
+                    break
+                sha = hashlib.sha256(data).hexdigest()
+                # take the ref BEFORE dropping the old ones, so a blob shared
+                # between old and new content is never deleted then re-uploaded.
+                if sha in pending:
+                    dups.append(sha)
                 else:
-                    self.backend.delete(handle)
-                    self.meta.blob_incref(sha)
-            else:
+                    with self._blob_lock:
+                        known = self.meta.blob_get(sha) is not None
+                        if known:
+                            self.meta.blob_incref(sha)
+                    if known:
+                        acquired.append(sha)
+                    else:
+                        while len(running) >= self.upload_workers:
+                            done, running = wait(running, return_when=FIRST_COMPLETED)
+                            for f in done:
+                                f.result()
+                        fut = self._up.submit(self._upload_blob, sha, data)
+                        pending[sha] = fut
+                        running.add(fut)
+                        acquired.append(sha)
+                new.append((idx, off, len(data), sha))
+                idx += 1
+                off += len(data)
+            for fut in pending.values():
+                fut.result()
+            for sha in dups:
                 self.meta.blob_incref(sha)
-            new.append((idx, off, len(data), sha))
-            idx += 1
-            off += len(data)
+                acquired.append(sha)
+        except BaseException:
+            for fut in pending.values():
+                fut.cancel()
+            wait(pending.values())
+            for sha in acquired:
+                if sha in pending and (pending[sha].cancelled() or pending[sha].exception()):
+                    continue  # never registered
+                self._release(sha)
+            raise
 
         self.meta.set_chunks(ino, new)
         self.meta.set_size(ino, off)
 
         for sha in old_shas:
-            handle = self.meta.blob_decref(sha)
-            if handle is not None:
-                self.backend.delete(handle)
+            self._release(sha)
 
     def free_file(self, ino: int) -> None:
         """Release all blobs referenced by an inode (used when nlink hits 0)."""
@@ -73,28 +134,81 @@ class Store:
                 self.backend.delete(handle)
         self.meta.set_chunks(ino, [])
 
-    def read_chunk(self, sha: str) -> bytes:
+    # ----- reading -----------------------------------------------------------
+    def _fetcher(self, sha: str):
         row = self.meta.blob_get(sha)
         if row is None:
             raise FileNotFoundError(f"blob {sha} not in index")
         handle = row["handle"]
+        return lambda: self.backend.download(handle)
+
+    def read_chunk(self, sha: str, lo: int | None = None, hi: int | None = None) -> bytes:
+        """Return a chunk (or its [lo:hi] slice), via the cache when present."""
+        loader = self._fetcher(sha)
         if self.cache is not None:
-            return self.cache.get(sha, lambda: self.backend.download(handle))
-        return self.backend.download(handle)
+            return self.cache.get_range(sha, lo, hi, loader)
+        data = loader()
+        return data if lo is None else data[lo:hi]
+
+    def iter_chunks(self, shas: list[str]) -> Iterator[bytes]:
+        """Yield chunk contents in order, downloading `download_workers` ahead."""
+        window: deque[Future] = deque()
+        it = iter(shas)
+        try:
+            for sha in it:
+                window.append(self._down.submit(self.read_chunk, sha))
+                if len(window) >= self.download_workers:
+                    yield window.popleft().result()
+            while window:
+                yield window.popleft().result()
+        finally:
+            for f in window:
+                f.cancel()
+
+    def _prefetch(self, shas: list[str]) -> None:
+        for sha in shas:
+            try:
+                loader = self._fetcher(sha)
+            except FileNotFoundError:
+                continue
+            self._down.submit(self._safe_prefetch, sha, loader)
+
+    def _safe_prefetch(self, sha: str, loader) -> None:
+        try:
+            self.cache.prefetch(sha, loader)
+        except Exception:
+            pass  # best-effort; a real read will surface any error
 
     def read_range(self, ino: int, offset: int, length: int) -> bytes:
-        """Assemble a byte range from the inode's chunks (no cache)."""
+        """Assemble a byte range from the inode's chunks.
+
+        Cached chunks are range-read from disk (not loaded whole); missing
+        chunks needed by this read download in parallel, and the next
+        `readahead_chunks` chunks are prefetched in the background.
+        """
         if length <= 0:
             return b""
-        out = bytearray()
         end = offset + length
-        for ch in self.meta.get_chunks(ino):
-            c_off, c_len, sha = ch["off"], ch["len"], ch["sha"]
-            c_end = c_off + c_len
-            if c_end <= offset or c_off >= end:
-                continue
-            data = self.read_chunk(sha)
-            lo = max(offset, c_off) - c_off
-            hi = min(end, c_end) - c_off
-            out += data[lo:hi]
-        return bytes(out)
+        chunks = self.meta.get_chunks(ino)
+        hit = [
+            (i, ch) for i, ch in enumerate(chunks)
+            if ch["off"] + ch["len"] > offset and ch["off"] < end
+        ]
+        if not hit:
+            return b""
+
+        def part(ch):
+            lo = max(offset, ch["off"]) - ch["off"]
+            hi = min(end, ch["off"] + ch["len"]) - ch["off"]
+            return self.read_chunk(ch["sha"], lo, hi)
+
+        if len(hit) == 1:
+            out = part(hit[0][1])
+        else:
+            futs = [self._down.submit(part, ch) for _, ch in hit]
+            out = b"".join(f.result() for f in futs)
+
+        if self.readahead:
+            nxt = hit[-1][0] + 1
+            self._prefetch([c["sha"] for c in chunks[nxt : nxt + self.readahead]])
+        return out

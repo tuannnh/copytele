@@ -30,6 +30,9 @@ services:
       TGFS_CHANNEL: "-1001234567890"
       # --- optional tuning ---
       TGFS_CHUNK_SIZE: "32MiB"
+      TGFS_UPLOAD_WORKERS: "4"
+      TGFS_DOWNLOAD_WORKERS: "4"
+      TGFS_READAHEAD_CHUNKS: "2"
       TGFS_CACHE_CAP: "5GiB"
     volumes:
       # holds the session, meta.db (SOURCE OF TRUTH), cache, and copyparty hist.

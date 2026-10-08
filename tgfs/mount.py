@@ -218,12 +218,18 @@ def build_core(cfg: Config, *, connect: bool = True):
     backend = TelegramBackend(cfg, loop, connect=connect)
     meta = Meta(cfg.meta_db)
     cache = ReadCache(cfg.cache_dir, cfg.cache_cap)
-    store = Store(meta, backend, cfg.chunk_size, cache)
+    store = Store(
+        meta, backend, cfg.chunk_size, cache,
+        upload_workers=cfg.upload_workers,
+        download_workers=cfg.download_workers,
+        readahead_chunks=cfg.readahead_chunks,
+    )
     wb = WritebackManager(store, meta, cfg.cache_dir)
     core = FsCore(meta, store, wb)
 
     def cleanup():
         try:
+            store.close()
             meta.close()
         finally:
             backend.close()

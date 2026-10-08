@@ -1,0 +1,161 @@
+import io
+import stat
+import threading
+import time
+
+import pytest
+
+from tgfs.backend import MemoryBackend
+from tgfs.cache import ReadCache
+from tgfs.meta import ROOT_INO
+from tgfs.store import Store
+
+
+class SlowBackend(MemoryBackend):
+    """Tracks peak concurrent uploads/downloads."""
+
+    def __init__(self):
+        super().__init__()
+        self.active = 0
+        self.peak = 0
+        self._m = threading.Lock()
+
+    def _enter(self):
+        with self._m:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        time.sleep(0.05)
+
+    def _exit(self):
+        with self._m:
+            self.active -= 1
+
+    def upload(self, data):
+        self._enter()
+        try:
+            return super().upload(data)
+        finally:
+            self._exit()
+
+    def download(self, handle):
+        self._enter()
+        try:
+            return super().download(handle)
+        finally:
+            self._exit()
+
+
+def _mk(meta, name="f"):
+    return meta.create(ROOT_INO, name, stat.S_IFREG | 0o644, "f").id
+
+
+def _put(store, ino, data):
+    store.put_file(ino, io.BytesIO(data), len(data))
+
+
+@pytest.fixture
+def pstore(meta, tmp_path):
+    be = SlowBackend()
+    cache = ReadCache(tmp_path / "c", 1 << 20)
+    st = Store(meta, be, 16, cache, upload_workers=4, download_workers=4,
+               readahead_chunks=2)
+    yield st, be
+    st.close()
+
+
+def test_parallel_upload_ordered_and_concurrent(pstore, meta):
+    store, be = pstore
+    ino = _mk(meta)
+    data = b"".join(bytes([i]) * 16 for i in range(12))  # 12 distinct chunks
+    _put(store, ino, data)
+    assert be.peak > 1
+    assert be.peak <= 4
+    assert be.uploads == 12
+    assert [c["off"] for c in meta.get_chunks(ino)] == [i * 16 for i in range(12)]
+    assert store.read_range(ino, 0, len(data)) == data
+
+
+def test_parallel_upload_dedups_within_file(pstore, meta):
+    store, be = pstore
+    ino = _mk(meta)
+    _put(store, ino, b"A" * 16 * 6 + b"B" * 16)
+    assert be.uploads == 2
+    shas = meta.get_chunk_shas(ino)
+    assert meta.blob_get(shas[0])["refcount"] == 6
+    assert meta.blob_get(shas[-1])["refcount"] == 1
+
+
+def test_upload_failure_rolls_back(meta):
+    class Boom(MemoryBackend):
+        def upload(self, data):
+            if data.startswith(b"C"):
+                raise RuntimeError("boom")
+            return super().upload(data)
+
+    be = Boom()
+    store = Store(meta, be, 16, upload_workers=2)
+    ino = _mk(meta)
+    with pytest.raises(RuntimeError):
+        _put(store, ino, b"A" * 16 + b"B" * 16 + b"C" * 16)
+    assert meta.get_chunks(ino) == []
+    # no refs leak: every uploaded blob was released
+    assert meta.db.execute("SELECT COUNT(*) FROM blobs").fetchone()[0] == 0
+    assert not be._blobs
+    store.close()
+
+
+def test_iter_chunks_parallel_in_order(pstore, meta):
+    store, be = pstore
+    ino = _mk(meta)
+    data = b"".join(bytes([i]) * 16 for i in range(8))
+    _put(store, ino, data)
+    store.cache = None  # force real downloads
+    be.peak = 0
+    out = b"".join(store.iter_chunks(meta.get_chunk_shas(ino)))
+    assert out == data
+    assert be.peak > 1
+
+
+def test_cache_range_read_and_singleflight(tmp_path):
+    c = ReadCache(tmp_path, 1 << 20)
+    calls = []
+    gate = threading.Event()
+
+    def loader():
+        calls.append(1)
+        gate.wait(1)
+        return bytes(range(100))
+
+    results = []
+    ts = [
+        threading.Thread(target=lambda: results.append(c.get_range("s", 10, 20, loader)))
+        for _ in range(5)
+    ]
+    for t in ts:
+        t.start()
+    time.sleep(0.1)
+    gate.set()
+    for t in ts:
+        t.join()
+    assert len(calls) == 1  # one download shared by all waiters
+    assert results == [bytes(range(10, 20))] * 5
+    assert c.get_range("s", 95, 200, loader) == bytes(range(95, 100))  # clamps
+    assert len(calls) == 1
+
+
+def test_readahead_prefetches_next_chunks(pstore, meta):
+    store, be = pstore
+    ino = _mk(meta)
+    _put(store, ino, b"".join(bytes([i]) * 16 for i in range(6)))
+    shas = meta.get_chunk_shas(ino)
+    for sha in shas:  # drop cache so reads hit the backend
+        p = store.cache._path(sha)
+        if p.exists():
+            p.unlink()
+            store.cache._total -= store.cache._index.pop(sha)
+    d0 = be.downloads
+    store.read_range(ino, 0, 4)  # chunk 0 only; chunks 1,2 prefetched
+    deadline = time.time() + 2
+    while be.downloads < d0 + 3 and time.time() < deadline:
+        time.sleep(0.02)
+    assert be.downloads == d0 + 3

@@ -17,8 +17,17 @@ channel = -1001234567890
 
 [storage]
 # logical content chunk size; one Telegram message/document per chunk.
-# 32 MiB keeps message counts low while staying well under Telegram's per-file limit.
+# Files larger than one chunk are split automatically (and reassembled on read),
+# so Telegram's per-document limit (2 GiB, 4 GiB with Premium) never applies to
+# whole files -- only to a single chunk (config rejects chunk_size > 4000MiB).
+# Each in-flight chunk lives in RAM: peak ~ (upload_workers + readahead) * chunk_size.
 chunk_size = "32MiB"
+
+# parallel chunk transfers (each is its own MTProto upload/download)
+upload_workers = 4
+download_workers = 4
+# chunks prefetched ahead of a sequential read
+readahead_chunks = 2
 
 # local read-cache size cap (LRU eviction by sha256). Writeback temp files are
 # not counted against this and live in cache_dir/wb while a file is open for write.

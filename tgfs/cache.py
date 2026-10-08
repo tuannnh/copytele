@@ -36,6 +36,7 @@ class ReadCache:
         self.lock = threading.Lock()
         self._index: OrderedDict[str, int] = OrderedDict()
         self._total = 0
+        self._inflight: dict[str, threading.Event] = {}
         for p in sorted(self.dir.iterdir(), key=lambda x: x.stat().st_mtime):
             if p.is_file():
                 sz = p.stat().st_size
@@ -45,17 +46,70 @@ class ReadCache:
     def _path(self, sha: str) -> Path:
         return self.dir / sha
 
-    def get(self, sha: str, loader: Callable[[], bytes]) -> bytes:
+    def _read_cached(self, sha: str, lo: int | None, hi: int | None) -> bytes | None:
+        """Read (a slice of) a cached blob, or None on miss."""
         with self.lock:
-            if sha in self._index:
-                self._index.move_to_end(sha)
-                try:
-                    return self._path(sha).read_bytes()
-                except OSError:
-                    self._index.pop(sha, None)  # vanished; fall through to reload
+            if sha not in self._index:
+                return None
+            self._index.move_to_end(sha)
+        try:
+            with open(self._path(sha), "rb") as f:
+                if lo is None:
+                    return f.read()
+                f.seek(lo)
+                return f.read(max(0, hi - lo))
+        except OSError:
+            with self.lock:  # vanished; treat as a miss
+                sz = self._index.pop(sha, None)
+                if sz is not None:
+                    self._total -= sz
+            return None
+
+    def _load_once(self, sha: str, loader: Callable[[], bytes]) -> bytes | None:
+        """Singleflight: concurrent misses on one sha share a single download.
+
+        Returns the blob when this caller downloaded it, else None (another
+        caller did; the data is now on disk).
+        """
+        with self.lock:
+            ev = self._inflight.get(sha)
+            leader = ev is None
+            if leader:
+                ev = self._inflight[sha] = threading.Event()
+        if not leader:
+            ev.wait()
+            return None
+        try:
+            data = loader()
+            self._store(sha, data)
+            return data
+        finally:
+            with self.lock:
+                self._inflight.pop(sha, None)
+            ev.set()
+
+    def get(self, sha: str, loader: Callable[[], bytes]) -> bytes:
+        return self.get_range(sha, None, None, loader)
+
+    def get_range(
+        self, sha: str, lo: int | None, hi: int | None,
+        loader: Callable[[], bytes],
+    ) -> bytes:
+        """Return blob[lo:hi] (whole blob if lo is None), fetching on a miss."""
+        for _ in range(3):
+            got = self._read_cached(sha, lo, hi)
+            if got is not None:
+                return got
+            data = self._load_once(sha, loader)
+            if data is not None:
+                return data if lo is None else data[lo:hi]
+        # waiter's leader failed or cache can't hold it: fetch directly
         data = loader()
-        self._store(sha, data)
-        return data
+        return data if lo is None else data[lo:hi]
+
+    def prefetch(self, sha: str, loader: Callable[[], bytes]) -> None:
+        if self._read_cached(sha, 0, 0) is None:
+            self._load_once(sha, loader)
 
     def _store(self, sha: str, data: bytes) -> None:
         with self.lock:
@@ -116,8 +170,9 @@ class WritebackManager:
             return
         st.fobj.seek(0)
         st.fobj.truncate(0)
-        for ch in self.meta.get_chunks(st.ino):
-            st.fobj.write(self.store.read_chunk(ch["sha"]))
+        shas = [ch["sha"] for ch in self.meta.get_chunks(st.ino)]
+        for data in self.store.iter_chunks(shas):
+            st.fobj.write(data)
         st.fobj.flush()
         st.materialized = True
 
