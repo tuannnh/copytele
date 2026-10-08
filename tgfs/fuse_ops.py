@@ -44,6 +44,7 @@ class FsCore:
             sz = self.wb.live_size(n.id)
             if sz is not None:
                 n.size = sz
+                n.blocks = self.wb.live_blocks(n.id)
         return n
 
     def getattr(self, ino: int) -> Inode:

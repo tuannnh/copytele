@@ -283,6 +283,17 @@ class WritebackManager:
         st = self._states.get(ino)
         return st.size if st is not None and st.materialized else None
 
+    def live_blocks(self, ino: int) -> int | None:
+        """Really-allocated 512B blocks of the temp file (it is sparse), so
+        clients probing for sparse-file support (copyparty) see the truth."""
+        st = self._states.get(ino)
+        if st is None or not st.materialized:
+            return None
+        try:
+            return os.fstat(st.fobj.fileno()).st_blocks
+        except (OSError, ValueError):
+            return None
+
     # ----- io --------------------------------------------------------------
     def read(self, st: _FileState, size: int, offset: int) -> bytes:
         with st.lock:

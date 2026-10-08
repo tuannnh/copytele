@@ -72,6 +72,7 @@ class Inode:
     ctime: float
     nlink: int
     target: str | None
+    blocks: int | None = None  # allocated 512B blocks of unflushed (sparse) data
 
     @property
     def is_dir(self) -> bool:

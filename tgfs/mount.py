@@ -71,7 +71,7 @@ class TgfsOperations(pyfuse3.Operations):
         else:
             a.st_size = n.size
         a.st_blksize = 4096
-        a.st_blocks = (n.size + 511) // 512
+        a.st_blocks = n.blocks if n.blocks is not None else (n.size + 511) // 512
         a.st_atime_ns = int(n.atime * 1e9)
         a.st_mtime_ns = int(n.mtime * 1e9)
         a.st_ctime_ns = int(n.ctime * 1e9)

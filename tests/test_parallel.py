@@ -276,3 +276,13 @@ def test_discard_drops_pending_without_upload(wbm, meta):
     time.sleep(0.6)
     assert be.uploads == 0
     assert ino not in wb._states
+
+
+def test_live_file_reports_sparse_blocks(core, meta, root):
+    """copyparty probes sparse support: write 1 byte at 1 MiB, expect st_blocks < 2048."""
+    fh, node = core.create(root, "probe", 0o644, 0, 0, 0)
+    core.write(fh, (1 << 20) - 1, b"e")
+    n = core.getattr(node.id)
+    assert n.size == 1 << 20
+    assert n.blocks is not None and n.blocks < 2048
+    core.release(fh)
