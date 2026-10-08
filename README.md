@@ -199,7 +199,7 @@ disk (`--hist`), and content-addressed dedup.
   every blob well under that, so file size is effectively unbounded. Splitting
   is automatic and invisible: copyparty/FUSE see one file, tgfs stores N chunks.
   Premium needs no setting; just keep `chunk_size` <= 4000MiB.
-- Throughput: chunks upload/download in parallel (`upload_workers`,
+- Throughput: chunks upload/download in parallel (`connections` per chunk, `upload_workers`,
   `download_workers`), sequential reads prefetch `readahead_chunks`, and cached
   chunks are range-read from disk. RAM peak ~ (workers + readahead) x chunk_size.
 - Don't point two tgfs instances at the same channel + metadata DB simultaneously.

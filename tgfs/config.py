@@ -52,6 +52,7 @@ class Config:
     channel: int | str
     chunk_size: int
     cache_cap: int
+    connections: int  # MTProto connections per transfer; 0 = auto
     upload_workers: int
     download_workers: int
     readahead_chunks: int
@@ -109,8 +110,9 @@ def load(path: str | Path = "config.toml") -> Config:
         channel=channel,
         chunk_size=chunk_size,
         cache_cap=parse_size(pick(st, "cache_cap", "5GiB")),
-        upload_workers=int(pick(st, "upload_workers", 4)),
-        download_workers=int(pick(st, "download_workers", 4)),
+        connections=int(pick(st, "connections", 0)),
+        upload_workers=int(pick(st, "upload_workers", 2)),
+        download_workers=int(pick(st, "download_workers", 2)),
         readahead_chunks=int(pick(st, "readahead_chunks", 2)),
         meta_db=root / str(pick(pa, "meta_db", "data/meta.db")),
         cache_dir=root / str(pick(pa, "cache_dir", "data/cache")),

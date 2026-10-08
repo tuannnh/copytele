@@ -142,7 +142,14 @@ class Store:
         if row is None:
             raise FileNotFoundError(f"blob {sha} not in index")
         handle = row["handle"]
-        return lambda: self.backend.download(handle)
+
+        def load() -> bytes:
+            data = self.backend.download(handle)
+            if hashlib.sha256(data).hexdigest() != sha:  # catches torn transfers
+                raise OSError(f"blob {sha[:12]} failed integrity check")
+            return data
+
+        return load
 
     def read_chunk(self, sha: str, lo: int | None = None, hi: int | None = None) -> bytes:
         """Return a chunk (or its [lo:hi] slice), via the cache when present."""

@@ -20,10 +20,19 @@ from telethon.tl.types import DocumentAttributeFilename
 from .asyncbridge import AsyncLoop
 from .config import Config
 
+try:  # needs Telethon internals; stock path is the fallback
+    from . import fasttransfer
+except Exception:  # pragma: no cover
+    fasttransfer = None
+
 log = logging.getLogger("tgfs.telegram")
 
 _MAX_RETRIES = 5
 _CHUNK_NAME = "tgfs.bin"
+MIB = 1024 * 1024
+# one document: 8000 parts x 512 KiB = 4000 MiB on Premium; 4000 parts free
+_LIMIT_PREMIUM = 4000 * MIB
+_LIMIT_FREE = 1950 * MIB
 
 
 class TelegramBackend:
@@ -32,6 +41,9 @@ class TelegramBackend:
         self.loop = loop
         self._client: TelegramClient | None = None
         self._entity: Any = None
+        self._pools: dict[int, Any] = {}
+        self.premium = False
+        self.conns = 1
         if connect:
             self.loop.call(self._connect())
 
@@ -48,6 +60,20 @@ class TelegramBackend:
         self._client = client
         self._entity = await self._resolve_channel()
         me = await client.get_me()
+        self.premium = bool(getattr(me, "premium", False))
+        limit = _LIMIT_PREMIUM if self.premium else _LIMIT_FREE
+        if self.cfg.chunk_size > limit:
+            raise RuntimeError(
+                f"chunk_size {self.cfg.chunk_size // MIB} MiB exceeds Telegram's "
+                f"{limit // MIB} MiB per-file limit for this "
+                f"{'Premium' if self.premium else 'free'} account"
+            )
+        req = self.cfg.connections
+        self.conns = req if req > 0 else (8 if self.premium else 4)
+        if fasttransfer is None:
+            self.conns = 1
+        log.info("premium=%s, %d parallel connection(s) per transfer",
+                 self.premium, self.conns)
         log.info(
             "connected as %s; storage channel resolved: %s",
             getattr(me, "username", None) or me.id,
@@ -110,10 +136,13 @@ class TelegramBackend:
             return
         client = self._client
         self._client = None
+        pools, self._pools = self._pools, {}
 
         async def _dc() -> None:
             # must run on the backend's own loop, else Telethon builds a Future
             # bound to the wrong loop ("attached to a different loop")
+            for pool in pools.values():
+                await pool.close()
             await client.disconnect()
 
         try:
@@ -152,13 +181,30 @@ class TelegramBackend:
     def delete(self, handle: int) -> None:
         self.loop.call(self._delete(handle))
 
+    def _pool(self, dc_id: int):
+        pool = self._pools.get(dc_id)
+        if pool is None:
+            pool = self._pools[dc_id] = fasttransfer.SenderPool(
+                self.client, dc_id, self.conns
+            )
+        return pool
+
     async def _upload(self, data: bytes) -> int:
         async def go():
-            buf = io.BytesIO(data)
-            buf.name = _CHUNK_NAME
+            file: Any = None
+            if self.conns > 1 and len(data) > fasttransfer.BIG_FILE:
+                try:
+                    file = await fasttransfer.upload_big(
+                        self._pool(self.client.session.dc_id), data, _CHUNK_NAME
+                    )
+                except Exception as ex:
+                    log.warning("parallel upload failed (%s); using stock path", ex)
+            if file is None:
+                file = io.BytesIO(data)
+                file.name = _CHUNK_NAME
             msg = await self.client.send_file(
                 self._entity,
-                file=buf,
+                file=file,
                 force_document=True,
                 attributes=[DocumentAttributeFilename(_CHUNK_NAME)],
             )
@@ -171,6 +217,14 @@ class TelegramBackend:
             msg = await self.client.get_messages(self._entity, ids=handle)
             if msg is None or msg.media is None:
                 raise FileNotFoundError(f"blob message {handle} missing")
+            doc = getattr(msg, "document", None)
+            if self.conns > 1 and doc is not None and doc.size > 4 * MIB:
+                try:
+                    return await fasttransfer.download_doc(
+                        self._pool(doc.dc_id), self.client, msg.media, doc.size
+                    )
+                except Exception as ex:
+                    log.warning("parallel download failed (%s); using stock path", ex)
             data = await self.client.download_media(msg, file=bytes)
             assert isinstance(data, (bytes, bytearray))
             return bytes(data)
