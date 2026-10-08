@@ -286,3 +286,30 @@ def test_live_file_reports_sparse_blocks(core, meta, root):
     assert n.size == 1 << 20
     assert n.blocks is not None and n.blocks < 2048
     core.release(fh)
+
+
+def test_preallocated_file_flush_skips_zero_chunks(wbm, meta):
+    wb, store, be = wbm
+    ino = _mk(meta)
+    n = 200  # 200 x 16 B chunks, only one written
+    st = wb.open(ino, True)
+    wb.write(st, b"x", 16 * n - 1)  # copyparty's "write 1 byte at the end"
+    wb.truncate(st, 16 * n)
+    hashed = []
+    real = __import__("hashlib").sha256
+    import tgfs.store as ts
+
+    def spy(data=b""):
+        hashed.append(len(data))
+        return real(data)
+
+    ts.hashlib = type("H", (), {"sha256": staticmethod(spy)})
+    try:
+        wb.sync(st)
+    finally:
+        ts.hashlib = __import__("hashlib")
+    wb.release(st)
+    assert be.uploads == 2  # one zero chunk (shared) + the chunk with the byte
+    assert sum(1 for h in hashed if h == 16) <= 2 + 1  # not hashing 199 holes
+    data = store.read_range(ino, 0, 16 * n)
+    assert data == b"\x00" * (16 * n - 1) + b"x"

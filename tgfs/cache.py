@@ -347,7 +347,13 @@ class WritebackManager:
         st.fobj.flush()
         st.fobj.seek(0)
         old_n = len(st.base)
-        self.store.put_file(st.ino, st.fobj, st.size, dirty=st.dirty_idx)
+        cs = self._cs
+        nchunks = -(-st.size // cs)
+        # chunks past the stored ones that nobody wrote are all zeros
+        holes = set(range(len(st.base), nchunks)) - st.dirty_idx
+        self.store.put_file(
+            st.ino, st.fobj, st.size, dirty=st.dirty_idx, holes=holes
+        )
         rows = self.meta.get_chunks(st.ino)
         st.base = [(r["off"], r["len"], r["sha"]) for r in rows]
         st.loaded |= set(range(old_n, len(st.base)))  # fresh chunks live in temp

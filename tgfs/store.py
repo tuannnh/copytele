@@ -38,6 +38,7 @@ class Store:
             self.download_workers, thread_name_prefix="tgfs-down"
         )
         self._blob_lock = threading.Lock()  # serializes create/incref/decref races
+        self._zero_shas: dict[int, str] = {}
         self._ra_lock = threading.Lock()
         self._ra_queued: set[str] = set()  # shas with a prefetch task queued
         self._last_end: dict[int, int] = {}  # ino -> end offset of last read
@@ -58,6 +59,12 @@ class Store:
             self.meta.blob_incref(sha)
         self.backend.delete(handle)
 
+    def _zero_sha(self, n: int) -> str:
+        sha = self._zero_shas.get(n)
+        if sha is None:
+            sha = self._zero_shas[n] = hashlib.sha256(bytes(n)).hexdigest()
+        return sha
+
     def _release(self, sha: str) -> None:
         with self._blob_lock:  # vs. put_file's check-then-incref
             handle = self.meta.blob_decref(sha)
@@ -65,7 +72,8 @@ class Store:
             self.backend.delete(handle)
 
     def put_file(
-        self, ino: int, src: BinaryIO, size: int, dirty: set[int] | None = None
+        self, ino: int, src: BinaryIO, size: int, dirty: set[int] | None = None,
+        holes: set[int] | None = None,
     ) -> None:
         """Replace inode `ino`'s content with the bytes read from `src`.
 
@@ -76,6 +84,8 @@ class Store:
         If `dirty` is given, only those chunk indexes (plus any chunk without a
         matching stored one) are read/hashed/uploaded; the rest reuse their
         existing blob and `src` is never read for them (it may be sparse).
+        Chunks in `holes` are known to be all zeros: they are neither read nor
+        hashed (the zero-chunk hash is cached) and share one stored blob.
         """
         old_rows = self.meta.get_chunks(ino)
         old_shas = [r["sha"] for r in old_rows]
@@ -107,10 +117,17 @@ class Store:
                     off += want
                     src.seek(off)
                     continue
-                data = src.read(want)
-                if not data:
-                    break
-                sha = hashlib.sha256(data).hexdigest()
+                if holes and idx in holes:
+                    sha = self._zero_sha(want)
+                    data = None  # materialized only if the blob must be uploaded
+                    src.seek(off + want)
+                    n = want
+                else:
+                    data = src.read(want)
+                    if not data:
+                        break
+                    sha = hashlib.sha256(data).hexdigest()
+                    n = len(data)
                 # take the ref BEFORE dropping the old ones, so a blob shared
                 # between old and new content is never deleted then re-uploaded.
                 if sha in pending:
@@ -123,6 +140,8 @@ class Store:
                     if known:
                         acquired.append(sha)
                     else:
+                        if data is None:
+                            data = bytes(want)
                         while len(running) >= self.upload_workers:
                             done, running = wait(running, return_when=FIRST_COMPLETED)
                             for f in done:
@@ -131,9 +150,9 @@ class Store:
                         pending[sha] = fut
                         running.add(fut)
                         acquired.append(sha)
-                new.append((idx, off, len(data), sha))
+                new.append((idx, off, n, sha))
                 idx += 1
-                off += len(data)
+                off += n
             for fut in pending.values():
                 fut.result()
             for sha in dups:
