@@ -80,10 +80,21 @@ else
     AUTH_ARGS=(-v "$MNT::A")
 fi
 
+# Inbox: uploads into /<CP_INBOX>/ (default "iphone") are sorted by file type into
+# /photos, /videos and /files; uploads anywhere else are left where they are.
+# CP_INBOX="" turns sorting off.
+export CP_INBOX="${CP_INBOX-iphone}"
+HOOK_ARGS=()
+if [ -n "$CP_INBOX" ]; then
+    echo "[entrypoint] sorting uploads in /$CP_INBOX/ into /photos /videos /files"
+    HOOK_ARGS=(--xbu "j,c1,/usr/local/share/tgfs/hooks/sort-uploads.py")
+fi
+
 # data on Telegram (the mount); copyparty index/thumbs on local disk (--hist)
 python -m copyparty \
     -i 0.0.0.0 -p "$PORT" \
     "${AUTH_ARGS[@]}" \
+    "${HOOK_ARGS[@]}" \
     --hist "$HIST" \
     "$@" &
 CP_PID=$!

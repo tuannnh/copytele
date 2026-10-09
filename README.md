@@ -136,14 +136,23 @@ UI **and** WebDAV. Without them the share is open to anyone who can reach the po
 With them, anonymous requests get `401`, and any username works together with the
 right password (so you can also type the password in the username field).
 
-### WebDAV (iPhone Files, Finder, Explorer)
+### Inbox: auto-sort uploads by type
+
+Upload anything into `/iphone/` (set another name with `CP_INBOX`, or `CP_INBOX=` to
+disable) and the server files it by type: photos (`jpg heic png dng ...`) into
+`/photos/`, videos (`mov mp4 m4v ...`) into `/videos/`, everything else into `/files/`.
+Uploads into any other folder are left where you put them. A different file with the
+same name is kept under a unique suffixed name, never overwritten. The sorting is the
+`hooks/sort-uploads.py` hook (copyparty `--xbu`); it works for the browser, the iOS
+Shortcut and WebDAV/PUT clients alike.
+
+### WebDAV (Finder, Explorer, iPhone apps)
 
 copyparty serves WebDAV on the same port, including `OPTIONS`/`PROPFIND`/`PUT`/`MKCOL`.
 
-- **iPhone/iPad Files:** *Browse → ⋯ → Connect to Server* → `https://files.example.com`
-  → *Registered User* → your `CP_USER` / `CP_PASS`. It needs a valid HTTPS certificate
-  (a reverse proxy / Cloudflare in front is fine) and a password; with login enabled
-  the server sends the Basic-auth challenge iOS expects.
+- **iPhone/iPad:** the built-in Files app only supports SMB, not WebDAV. Use a WebDAV
+  app (e.g. Documents, Cyberduck, PhotoSync) with `https://files.example.com/iphone/`,
+  or the web UI / copyparty's iOS Shortcut.
 - **macOS Finder:** *Go → Connect to Server* → the same URL.
 - **Windows / Android:** use rclone (`rclone config` → webdav, vendor *other*) or the OS
   built-in; the in-app *connect* button in the copyparty control panel shows the steps.
