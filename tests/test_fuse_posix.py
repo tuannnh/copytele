@@ -186,3 +186,44 @@ def test_rename_into_subdir(core):
 def test_statfs(core):
     s = core.statfs()
     assert s["f_namemax"] == 255 and s["f_bsize"] > 0
+
+
+def _core_with_delay(store, meta, tmp_path, delay):
+    from tgfs.cache import WritebackManager
+    from tgfs.fuse_ops import FsCore
+
+    wb = WritebackManager(store, meta, tmp_path / "wbdelay", flush_delay=delay)
+    return FsCore(meta, store, wb), wb
+
+
+def test_utimens_after_write_survives_delayed_flush(store, meta, tmp_path):
+    core, wb = _core_with_delay(store, meta, tmp_path, 30)
+    try:
+        fh, node = _create(core, ROOT_INO, "up.bin")
+        core.write(fh, 0, b"x" * 40)
+        core.release(fh)  # close: flush is deferred
+        old = 1_700_000_000.0
+        core.setattr(node.id, mtime=old)  # client mtime applied after upload
+        wb._reap_once(force=True)  # the lazy flush runs now
+        n = core.getattr(node.id)
+        assert n.size == 40
+        assert n.mtime == old
+    finally:
+        wb.shutdown()
+
+
+def test_write_after_utimens_bumps_mtime_on_flush(store, meta, tmp_path):
+    core, wb = _core_with_delay(store, meta, tmp_path, 30)
+    try:
+        fh, node = _create(core, ROOT_INO, "w.bin")
+        core.write(fh, 0, b"x" * 8)
+        core.release(fh)
+        old = 1_700_000_000.0
+        core.setattr(node.id, mtime=old)
+        fh = core.open(node.id, os.O_RDWR)
+        core.write(fh, 0, b"y")
+        core.release(fh)
+        wb._reap_once(force=True)
+        assert core.getattr(node.id).mtime > old
+    finally:
+        wb.shutdown()

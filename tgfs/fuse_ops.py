@@ -81,6 +81,8 @@ class FsCore:
             size=None,  # size handled via truncate above
             atime=atime, mtime=mtime,
         )
+        if mtime is not None:
+            self.wb.pin_mtime(ino)
         return self.getattr(ino)
 
     # ----- directory mutations ---------------------------------------------
