@@ -15,8 +15,12 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY tgfs ./tgfs
 # install tgfs + the full feature set (copyparty, Pillow, mutagen, argon2, cryptg)
+# then make sure copyparty is the newest release (https://github.com/9001/copyparty);
+# pin one with --build-arg COPYPARTY_VERSION=1.20.25
+ARG COPYPARTY_VERSION=
 RUN pip install --no-cache-dir -U pip \
-    && pip install --no-cache-dir ".[full]"
+    && pip install --no-cache-dir ".[full]" \
+    && pip install --no-cache-dir -U "copyparty${COPYPARTY_VERSION:+==$COPYPARTY_VERSION}"
 
 # ---- runtime stage ------------------------------------------------------------
 FROM python:3.12-slim

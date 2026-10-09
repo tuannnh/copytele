@@ -129,6 +129,25 @@ docker compose up -d
 copyparty comes up on port `3923` with all feature flags enabled
 (`-e2dsa -e2ts --dedup --xff-src lan`).
 
+### Login
+
+Set `CP_USER` and `CP_PASS` (both, or neither) to require a password for the web
+UI **and** WebDAV. Without them the share is open to anyone who can reach the port.
+With them, anonymous requests get `401`, and any username works together with the
+right password (so you can also type the password in the username field).
+
+### WebDAV (iPhone Files, Finder, Explorer)
+
+copyparty serves WebDAV on the same port, including `OPTIONS`/`PROPFIND`/`PUT`/`MKCOL`.
+
+- **iPhone/iPad Files:** *Browse → ⋯ → Connect to Server* → `https://files.example.com`
+  → *Registered User* → your `CP_USER` / `CP_PASS`. It needs a valid HTTPS certificate
+  (a reverse proxy / Cloudflare in front is fine) and a password; with login enabled
+  the server sends the Basic-auth challenge iOS expects.
+- **macOS Finder:** *Go → Connect to Server* → the same URL.
+- **Windows / Android:** use rclone (`rclone config` → webdav, vendor *other*) or the OS
+  built-in; the in-app *connect* button in the copyparty control panel shows the steps.
+
 ### Behind an HTTPS reverse proxy
 
 copyparty only honors forwarded headers from trusted proxy IPs; the image default

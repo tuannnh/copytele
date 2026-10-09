@@ -30,6 +30,10 @@ services:
       TGFS_API_HASH: "your_api_hash_here"
       # dedicated PRIVATE channel id that stores the blobs (use `... channels`)
       TGFS_CHANNEL: "-1001234567890"
+      # --- login (recommended): require a password for the web UI and WebDAV ---
+      # set both, or neither (neither = anonymous full access; LAN only!)
+      CP_USER: "admin"
+      CP_PASS: "change_me"
       # --- optional tuning ---
       TGFS_CHUNK_SIZE: "32MiB"
       TGFS_CONNECTIONS: "0"

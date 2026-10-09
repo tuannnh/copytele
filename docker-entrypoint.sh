@@ -62,10 +62,28 @@ done
 is_mounted || { echo "[entrypoint] ERROR: mount not ready"; exit 1; }
 echo "[entrypoint] mount ready; starting copyparty on :$PORT"
 
+# Login: set CP_USER + CP_PASS to require a password for everything (web UI and
+# WebDAV; any username works with the right password, so clients such as the
+# iPhone Files app can use either). Without them the share is open to anyone
+# who can reach the port -- fine on a LAN, not behind a public hostname.
+CP_USER="${CP_USER:-}"
+CP_PASS="${CP_PASS:-}"
+if [ -n "$CP_USER" ] || [ -n "$CP_PASS" ]; then
+    if [ -z "$CP_USER" ] || [ -z "$CP_PASS" ]; then
+        echo "[entrypoint] ERROR: set both CP_USER and CP_PASS (or neither)"
+        exit 1
+    fi
+    echo "[entrypoint] login enabled for user '$CP_USER'"
+    AUTH_ARGS=(-a "$CP_USER:$CP_PASS" -v "$MNT::rwmda,$CP_USER" --dav-auth)
+else
+    echo "[entrypoint] WARNING: CP_USER/CP_PASS not set -- no login, anonymous full access"
+    AUTH_ARGS=(-v "$MNT::A")
+fi
+
 # data on Telegram (the mount); copyparty index/thumbs on local disk (--hist)
 python -m copyparty \
     -i 0.0.0.0 -p "$PORT" \
-    -v "$MNT::A" \
+    "${AUTH_ARGS[@]}" \
     --hist "$HIST" \
     "$@" &
 CP_PID=$!
