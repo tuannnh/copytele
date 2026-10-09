@@ -65,7 +65,8 @@ class Store:
             self.backend.delete(handle)
 
     def put_file(
-        self, ino: int, src: BinaryIO, size: int, dirty: set[int] | None = None
+        self, ino: int, src: BinaryIO, size: int, dirty: set[int] | None = None,
+        keep_mtime: bool = False,
     ) -> None:
         """Replace inode `ino`'s content with the bytes read from `src`.
 
@@ -76,6 +77,8 @@ class Store:
         If `dirty` is given, only those chunk indexes (plus any chunk without a
         matching stored one) are read/hashed/uploaded; the rest reuse their
         existing blob and `src` is never read for them (it may be sparse).
+
+        `keep_mtime` leaves the inode's stored mtime alone (it was set explicitly).
         """
         old_rows = self.meta.get_chunks(ino)
         old_shas = [r["sha"] for r in old_rows]
@@ -150,7 +153,7 @@ class Store:
             raise
 
         self.meta.set_chunks(ino, new)
-        self.meta.set_size(ino, off)
+        self.meta.set_size(ino, off, keep_mtime)
 
         for sha in old_shas:
             self._release(sha)

@@ -314,12 +314,18 @@ class Meta:
             self.db.execute(f"UPDATE inodes SET {','.join(sets)} WHERE id=?", vals)
             self.db.commit()
 
-    def set_size(self, ino: int, size: int) -> None:
+    def set_size(self, ino: int, size: int, keep_mtime: bool = False) -> None:
+        now = time.time()
         with self.lock:
-            self.db.execute(
-                "UPDATE inodes SET size=?, mtime=?, ctime=? WHERE id=?",
-                (size, time.time(), time.time(), ino),
-            )
+            if keep_mtime:  # mtime was set explicitly (utimens) after the last write
+                self.db.execute(
+                    "UPDATE inodes SET size=?, ctime=? WHERE id=?", (size, now, ino)
+                )
+            else:
+                self.db.execute(
+                    "UPDATE inodes SET size=?, mtime=?, ctime=? WHERE id=?",
+                    (size, now, now, ino),
+                )
             self.db.commit()
 
     # ----- chunks ----------------------------------------------------------

@@ -169,6 +169,7 @@ class _FileState:
         self.loaded: set[int] = set()  # chunk idx whose bytes are in the temp file
         self.dirty_idx: set[int] = set()  # base chunks modified (new ones implicit)
         self.idle_since = 0.0
+        self.mtime_pinned = False  # utimens after the last write: flush keeps mtime
 
 
 class WritebackManager:
@@ -308,6 +309,7 @@ class WritebackManager:
             if data:
                 st.dirty_idx.update(range(offset // cs, (end - 1) // cs + 1))
             st.dirty = True
+            st.mtime_pinned = False
             return len(data)
 
     def truncate(self, st: _FileState, length: int) -> None:
@@ -328,6 +330,7 @@ class WritebackManager:
                 self._grow(st, length)
             st.fobj.truncate(length)
             st.dirty = True
+            st.mtime_pinned = False
 
     def _flush_locked(self, st: _FileState) -> None:
         if not st.dirty:
@@ -336,7 +339,9 @@ class WritebackManager:
         st.fobj.flush()
         st.fobj.seek(0)
         old_n = len(st.base)
-        self.store.put_file(st.ino, st.fobj, st.size, dirty=st.dirty_idx)
+        self.store.put_file(st.ino, st.fobj, st.size, dirty=st.dirty_idx,
+                            keep_mtime=st.mtime_pinned)
+        st.mtime_pinned = False
         rows = self.meta.get_chunks(st.ino)
         st.base = [(r["off"], r["len"], r["sha"]) for r in rows]
         st.loaded |= set(range(old_n, len(st.base)))  # fresh chunks live in temp
@@ -423,6 +428,14 @@ class WritebackManager:
             for st in self._states.values():
                 st.refcount = 0
         self._reap_once(force=True)
+
+    def pin_mtime(self, ino: int) -> None:
+        """An explicit mtime was just stored: a pending flush must not clobber it."""
+        st = self._states.get(ino)
+        if st is not None:
+            with st.lock:
+                if st.dirty:
+                    st.mtime_pinned = True
 
     # ----- truncate without an open handle (FUSE truncate on a path) -------
     def truncate_path(self, ino: int, length: int) -> None:
