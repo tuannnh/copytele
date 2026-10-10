@@ -31,6 +31,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -404,22 +405,37 @@ class WritebackManager:
                 st for st in self._states.values()
                 if st.refcount == 0 and (force or now - st.idle_since >= self.flush_delay)
             ]
-        for st in cands:
+        if not cands:
+            return
+
+        def flush_one(st: _FileState) -> bool:
+            """Flush one idle file; True if it failed (it will be retried)."""
             try:
                 with st.lock:
                     self._flush_locked(st)
             except Exception:
                 log.exception("flush of inode %d failed; will retry", st.ino)
                 st.idle_since = time.monotonic()
-                if force:
-                    raise
-                continue
+                return True
             with self.lock:
                 done = st.refcount == 0 and self._states.get(st.ino) is st
                 if done:
                     del self._states[st.ino]
             if done:
                 self._close_state(st)
+            return False
+
+        # Small files upload over one connection each (~2 MB/s), so flush several
+        # files at once (bounded by the upload workers; the store's own pool still
+        # caps the number of chunk uploads in flight).
+        workers = max(1, min(len(cands), self.store.upload_workers))
+        if workers == 1:
+            failed = [flush_one(st) for st in cands]
+        else:
+            with ThreadPoolExecutor(workers, thread_name_prefix="tgfs-flush") as ex:
+                failed = list(ex.map(flush_one, cands))
+        if force and any(failed):
+            raise OSError(f"{sum(failed)} file(s) could not be flushed")
 
     def shutdown(self) -> None:
         """Flush everything pending (unmount / SIGTERM)."""

@@ -227,3 +227,48 @@ def test_write_after_utimens_bumps_mtime_on_flush(store, meta, tmp_path):
         assert core.getattr(node.id).mtime > old
     finally:
         wb.shutdown()
+
+
+def test_delayed_flush_uploads_several_files_at_once(meta, tmp_path):
+    """Many small files must not be sent one after another over a single connection."""
+    import threading
+    import time
+
+    from tgfs.backend import MemoryBackend
+    from tgfs.cache import WritebackManager
+    from tgfs.fuse_ops import FsCore
+    from tgfs.store import Store
+
+    class SlowBackend(MemoryBackend):
+        def __init__(self):
+            super().__init__()
+            self.now = self.peak = 0
+            self.mu = threading.Lock()
+
+        def upload(self, data):
+            with self.mu:
+                self.now += 1
+                self.peak = max(self.peak, self.now)
+            time.sleep(0.05)
+            try:
+                return super().upload(data)
+            finally:
+                with self.mu:
+                    self.now -= 1
+
+    backend = SlowBackend()
+    store = Store(meta, backend, chunk_size=16, upload_workers=4)
+    wb = WritebackManager(store, meta, tmp_path / "wbpar", flush_delay=30)
+    core = FsCore(meta, store, wb)
+    try:
+        for i in range(8):
+            fh, _ = _create(core, ROOT_INO, f"f{i}.bin")
+            core.write(fh, 0, bytes([i]) * 10)  # distinct content, one chunk each
+            core.release(fh)
+        wb._reap_once(force=True)
+        assert backend.peak >= 2
+        for i in range(8):
+            n = core.lookup(ROOT_INO, f"f{i}.bin")
+            assert store.read_range(n.id, 0, 10) == bytes([i]) * 10
+    finally:
+        wb.shutdown()
