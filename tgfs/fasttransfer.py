@@ -13,6 +13,7 @@ falls back to Telethon's stock single-connection path.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import logging
 from typing import Any
@@ -25,6 +26,7 @@ from telethon.tl import functions, types
 log = logging.getLogger("tgfs.fast")
 
 PART = 512 * 1024  # MTProto's maximum part size
+SMALL_PART = 128 * 1024  # part size Telethon uses for small files (divides PART)
 BIG_FILE = 10 * 1024 * 1024  # below this Telegram wants md5'd small-file parts
 MAX_PARTS = 8000  # => 4000 MiB per document (Premium); 4000 parts free
 _PART_RETRIES = 4
@@ -128,6 +130,33 @@ async def upload_big(
 
     await _run_parts(pool, count, do_part)
     return types.InputFileBig(file_id, count, name)
+
+
+async def upload_small(
+    pool: SenderPool, data: bytes, name: str
+) -> types.InputFile:
+    """Upload ``data`` (<= BIG_FILE) over the pool; return an InputFile.
+
+    Telegram wants the small-file request (``SaveFilePart``) plus the file's md5
+    for files up to 10 MiB. The stock path sends such a file's parts one after
+    another over one connection (~2-3 MB/s); spreading the small parts over the
+    pool makes a 5 MB photo as fast as a big upload.
+    """
+    count = max(1, -(-len(data) // SMALL_PART))
+    file_id = helpers.generate_random_long()
+    view = memoryview(data)
+    md5 = hashlib.md5(data).hexdigest()
+
+    async def do_part(sender, i):
+        part = bytes(view[i * SMALL_PART : (i + 1) * SMALL_PART])
+        ok = await _call(
+            sender, functions.upload.SaveFilePartRequest(file_id, i, part)
+        )
+        if not ok:
+            raise RuntimeError(f"Telegram rejected upload part {i}")
+
+    await _run_parts(pool, count, do_part)
+    return types.InputFile(file_id, count, name, md5)
 
 
 async def download_doc(pool: SenderPool, client, media, size: int) -> bytes:

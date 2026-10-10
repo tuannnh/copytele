@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import logging
 from typing import Any
 
@@ -44,6 +45,9 @@ class TelegramBackend:
         self._pools: dict[int, Any] = {}
         self.premium = False
         self.conns = 1
+        # spread small blobs over several connections too (TGFS_SMALL_PARALLEL=0 disables)
+        self._small_fast = os.environ.get("TGFS_SMALL_PARALLEL", "1") != "0"
+        self._small_fail = 0
         if connect:
             self.loop.call(self._connect())
 
@@ -190,18 +194,7 @@ class TelegramBackend:
         return pool
 
     async def _upload(self, data: bytes) -> int:
-        async def go():
-            file: Any = None
-            if self.conns > 1 and len(data) > fasttransfer.BIG_FILE:
-                try:
-                    file = await fasttransfer.upload_big(
-                        self._pool(self.client.session.dc_id), data, _CHUNK_NAME
-                    )
-                except Exception as ex:
-                    log.warning("parallel upload failed (%s); using stock path", ex)
-            if file is None:
-                file = io.BytesIO(data)
-                file.name = _CHUNK_NAME
+        async def send(file: Any) -> int:
             msg = await self.client.send_file(
                 self._entity,
                 file=file,
@@ -209,6 +202,27 @@ class TelegramBackend:
                 attributes=[DocumentAttributeFilename(_CHUNK_NAME)],
             )
             return int(msg.id)
+
+        async def go():
+            if self.conns > 1:
+                big = len(data) > fasttransfer.BIG_FILE
+                if big or self._small_fast:
+                    try:
+                        pool = self._pool(self.client.session.dc_id)
+                        up = fasttransfer.upload_big if big else fasttransfer.upload_small
+                        return await send(await up(pool, data, _CHUNK_NAME))
+                    except (FloodWaitError, ConnectionError, OSError, asyncio.CancelledError):
+                        raise
+                    except Exception as ex:
+                        if not big:  # don't keep paying for a path Telegram refuses
+                            self._small_fail += 1
+                            if self._small_fail >= 3:
+                                self._small_fast = False
+                                log.warning("small-file multi-connection upload disabled")
+                        log.warning("parallel upload failed (%s); using stock path", ex)
+            file = io.BytesIO(data)
+            file.name = _CHUNK_NAME
+            return await send(file)
 
         return await self._with_retry("upload", go)
 
