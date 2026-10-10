@@ -13,6 +13,7 @@ import argparse
 import logging
 import os
 import sys
+from pathlib import Path
 
 from . import config as cfgmod
 
@@ -95,6 +96,35 @@ def cmd_smoke(args) -> int:
         loop.stop()
 
 
+def cmd_recover(args) -> int:
+    """Upload write-back files left behind by a crash/kill (run before mount)."""
+    from .asyncbridge import AsyncLoop
+    from .meta import Meta
+    from .recover import recover_stale
+    from .store import Store
+    from .telegram import TelegramBackend
+
+    cfg = cfgmod.load(args.config)
+    wb_dir = Path(cfg.cache_dir) / "wb"
+    if not wb_dir.is_dir() or not any(wb_dir.glob("*.wb")):
+        print("nothing to recover")
+        return 0
+    workers = int(os.environ.get("TGFS_RECOVER_WORKERS", "8"))
+    loop = AsyncLoop()
+    loop.start()
+    backend = TelegramBackend(cfg, loop)
+    meta = Meta(cfg.meta_db)
+    store = Store(meta, backend, cfg.chunk_size, None, upload_workers=workers)
+    try:
+        ok, bad = recover_stale(store, meta, wb_dir, workers)
+        return 0 if bad == 0 else 1
+    finally:
+        store.close()
+        meta.close()
+        backend.close()
+        loop.stop()
+
+
 def cmd_mount(args) -> int:
     from .mount import mount
 
@@ -118,6 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("smoke", help="round-trip a blob through the channel").set_defaults(
         func=cmd_smoke
     )
+    sub.add_parser(
+        "recover", help="upload unflushed write-back files left by a crash/kill"
+    ).set_defaults(func=cmd_recover)
     pm = sub.add_parser("mount", help="mount the filesystem")
     pm.add_argument("mountpoint", nargs="?", help="override config mountpoint")
     pm.add_argument("-b", "--background", action="store_true", help="daemonize")

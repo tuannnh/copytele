@@ -46,6 +46,22 @@ fi
 
 is_mounted() { awk -v m="$MNT" '$2==m{f=1} END{exit !f}' /proc/mounts; }
 
+# Uploads are written to a local cache first and sent to Telegram a little later.
+# If the container was killed before that finished, push the leftovers now --
+# mounting would delete them as stale. If it fails, stop (files stay in the cache);
+# set TGFS_RECOVER_FORCE=1 to start anyway and give them up.
+echo "[entrypoint] checking for unflushed uploads from a previous run"
+if ! python -m tgfs.main recover; then
+    if [ "${TGFS_RECOVER_FORCE:-0}" = "1" ]; then
+        echo "[entrypoint] WARNING: recovery failed, continuing (TGFS_RECOVER_FORCE=1)"
+    else
+        echo "[entrypoint] ERROR: could not upload unflushed files; leaving them in"
+        echo "             ${TGFS_CACHE_DIR:-/data/cache}/wb. Fix connectivity and restart,"
+        echo "             or set TGFS_RECOVER_FORCE=1 to discard them."
+        exit 1
+    fi
+fi
+
 echo "[entrypoint] mounting tgfs at $MNT"
 python -m tgfs.main mount "$MNT" &
 MOUNT_PID=$!
