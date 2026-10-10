@@ -138,13 +138,22 @@ right password (so you can also type the password in the username field).
 
 ### Inbox: auto-sort uploads by type
 
-Upload anything into `/iphone/` (set another name with `CP_INBOX`, or `CP_INBOX=` to
-disable) and the server files it by type: photos (`jpg heic png dng ...`) into
-`/photos/`, videos (`mov mp4 m4v ...`) into `/videos/`, everything else into `/files/`.
-Uploads into any other folder are left where you put them. A different file with the
-same name is kept under a unique suffixed name, never overwritten. The sorting is the
-`hooks/sort-uploads.py` hook (copyparty `--xbu`); it works for the browser, the iOS
-Shortcut and WebDAV/PUT clients alike.
+Upload into `/iphone/` (set another name with `CP_INBOX`, or `CP_INBOX=` to disable) and
+the server files each upload by type **inside the device folder you upload to**:
+
+```
+/iphone/Tuan's Iphone/Recents/IMG_0001.HEIC -> /iphone/Tuan's Iphone/photos/
+/iphone/Tuan's Iphone/Recents/clip.MOV      -> /iphone/Tuan's Iphone/videos/
+/iphone/Tuan's Iphone/Recents/report.pdf    -> /iphone/Tuan's Iphone/files/
+```
+
+Photos are `jpg heic png dng ...`, videos are `mov mp4 m4v ...`, everything else goes to
+`files`. A file dropped straight into `/iphone/` goes to `/iphone/photos` etc.; files already
+in a `photos`/`videos`/`files` folder, and uploads to any other top-level folder, are left
+where they are. A different file with the same name is kept under a unique suffixed name,
+never overwritten. The sorting is the `hooks/sort-uploads.py` hook (copyparty `--xbu`); it
+works for the browser, the iOS Shortcut and WebDAV/PUT clients (e.g. PhotoSync) alike.
+Apps that create an album folder (PhotoSync's `Recents`) leave that folder empty.
 
 ### WebDAV (Finder, Explorer, iPhone apps)
 

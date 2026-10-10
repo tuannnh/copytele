@@ -2,13 +2,17 @@
 """Sort uploads that land in the inbox folder by file type.
 
 copyparty runs this before every upload (``--xbu j,c1,<this file>``) with the
-upload info as JSON in argv[1]. Anything uploaded into ``/<inbox>/`` is moved:
+upload info as JSON in argv[1]. Uploads into ``/<inbox>/<device>/...`` are moved
+into that device's own sorted folders, so every device keeps its files apart:
 
-    /iphone/IMG_0001.HEIC -> /photos/IMG_0001.HEIC
-    /iphone/clip.MOV      -> /videos/clip.MOV
-    /iphone/report.pdf    -> /files/report.pdf
+    /iphone/Tuan's Iphone/Recents/IMG_0001.HEIC -> /iphone/Tuan's Iphone/photos/IMG_0001.HEIC
+    /iphone/Tuan's Iphone/Recents/clip.MOV      -> /iphone/Tuan's Iphone/videos/clip.MOV
+    /iphone/Tuan's Iphone/Recents/report.pdf    -> /iphone/Tuan's Iphone/files/report.pdf
 
-Uploads to any other folder are left exactly where they were put.
+A file dropped straight into the inbox (no device folder) goes to
+``/<inbox>/photos`` etc. Files already inside a ``photos``/``videos``/``files``
+folder are left alone (copyparty calls the hook again for the relocated path),
+and uploads to any other top-level folder are untouched.
 
 Environment:
     CP_INBOX   inbox folder name (default "iphone"; set empty to disable sorting)
@@ -22,6 +26,16 @@ PICS = set(
     "orf rw2 tga tif tiff webp".split()
 )
 VIDS = set("3gp 3g2 avi flv m4v mkv mov mp4 mpeg mpg mts m2ts ts webm wmv".split())
+CATS = ("photos", "videos", "files")
+
+
+def category(fn: str) -> str:
+    ext = fn.rsplit(".", 1)[-1].lower() if "." in fn else ""
+    if ext in PICS:
+        return "photos"
+    if ext in VIDS:
+        return "videos"
+    return "files"
 
 
 def target_folder(vp: str, inbox: str) -> str | None:
@@ -29,15 +43,19 @@ def target_folder(vp: str, inbox: str) -> str | None:
     inbox = inbox.strip("/")
     if not inbox:
         return None
-    vdir, fn = os.path.split(vp.strip("/"))
-    if vdir != inbox and not vdir.startswith(inbox + "/"):
+    parts = vp.strip("/").split("/")
+    if len(parts) < 2 or parts[0] != inbox:
+        return None  # not in the inbox
+    folders, fn = parts[1:-1], parts[-1]
+    cat = category(fn)
+    if not folders:  # dropped straight into the inbox
+        return f"/{inbox}/{cat}"
+    if folders[0] in CATS:  # already sorted (no device folder)
         return None
-    ext = fn.rsplit(".", 1)[-1].lower() if "." in fn else ""
-    if ext in PICS:
-        return "/photos"
-    if ext in VIDS:
-        return "/videos"
-    return "/files"
+    device = folders[0]
+    if len(folders) > 1 and folders[1] in CATS:  # already sorted under the device
+        return None
+    return f"/{inbox}/{device}/{cat}"
 
 
 def main() -> None:
